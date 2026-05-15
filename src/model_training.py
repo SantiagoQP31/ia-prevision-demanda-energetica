@@ -1,39 +1,63 @@
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from sklearn.metrics import mean_absolute_error
+import time
 
 def train_and_evaluate(X, y):
-    print("Iniciando Validación Cruzada Temporal (Expanding Window)...")
-
-    # Division en 5 pliegues cronologicos
-    tscv = TimeSeriesSplit(n_splits=5)
-    model = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)
-
-    fold = 1
-    maes = []
-
-    for train_index, test_index in tscv.split(X):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-
-        # Entrenamiento sobre la ventana expansiva
-        model.fit(X_train, y_train)
-        predicciones = model.predict(X_test)
-
-        # Evaluacion
-        mae = mean_absolute_error(y_test, predicciones)
-        maes.append(mae)
-
-        print(f"Fold {fold}: Train [{X_train.index.min().date()} a {X_train.index.max().date()}]"
-              f"| Test [{X_test.index.min().date()} a {X_test.index.max().date()}] -> MAE: {mae:.2f} MW")
-        fold += 1
-        
+    print("Iniciando Optimización de Hiperparámetros con RandomizedSearchCV...")
+    start_time = time.time()
+    
+    # Definición del espacio de hiperparámetros
+    param_dist = {
+        'n_estimators': [100, 200, 300],
+        'max_depth': [10, 20, 30, None],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4],
+        'max_features': ['sqrt', 'log2', None]
+    }
+    
+    # Configuración de la validación cruzada temporal para la búsqueda
+    # Usamos 3 pliegues para reducir el costo computacional local
+    tscv_search = TimeSeriesSplit(n_splits=3)
+    
+    rf_base = RandomForestRegressor(random_state=42, n_jobs=-1)
+    
+    # Inicialización del motor de búsqueda estocástica
+    # n_iter=10 evaluará 10 combinaciones aleatorias del espacio de parámetros
+    random_search = RandomizedSearchCV(
+        estimator=rf_base, 
+        param_distributions=param_dist, 
+        n_iter=10, 
+        cv=tscv_search, 
+        scoring='neg_mean_absolute_error',
+        random_state=42,
+        n_jobs=-1,
+        verbose=1
+    )
+    
+    # Ejecución de la optimización sobre el 80% inicial para evitar mirar al futuro
+    train_size = int(len(X) * 0.8)
+    X_train_search, y_train_search = X.iloc[:train_size], y.iloc[:train_size]
+    X_test_final, y_test_final = X.iloc[train_size:], y.iloc[train_size:]
+    
+    random_search.fit(X_train_search, y_train_search)
+    
+    elapsed_time = (time.time() - start_time) / 60
+    print(f"\nBúsqueda finalizada en {elapsed_time:.2f} minutos.")
+    print("Mejores hiperparámetros encontrados:")
+    print(random_search.best_params_)
+    
+    # Evaluación del modelo optimizado sobre el 20% no observado
+    best_model = random_search.best_estimator_
+    predicciones_finales = best_model.predict(X_test_final)
+    mae_final = mean_absolute_error(y_test_final, predicciones_finales)
+    
     print("-" * 60)
-    print(f"MAE Promedio de Validación Cruzada: {np.mean(maes):.2f} MW")
-
-    # Entrenamiento del modelo final con la totalidad de los datos para produccion
-    print("Entrenando agente base final con todo el dataset...")
-    model.fit(X, y)
-
-    return model
+    print(f"MAE del Agente Optimizado (Test Set): {mae_final:.2f} MW")
+    
+    # Reentrenamiento final con el 100% de los datos usando los parámetros óptimos
+    print("\nEntrenando agente final para producción con todo el dataset histórico...")
+    best_model.fit(X, y)
+    
+    return best_model
